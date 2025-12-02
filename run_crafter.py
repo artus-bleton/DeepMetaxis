@@ -66,23 +66,34 @@ class CrafterMetrics:
                 self.success_counts[a] += 1
 
 
-# ---------- Very Simple Replay ----------
+# ---------- Replay Buffer étendu ----------
 class ReplayBuffer:
     def __init__(self, capacity=50_000):
         self.capacity = capacity
-        self.obs, self.next_obs, self.actions = [], [], []
+        self.obs, self.next_obs = [], []
+        self.actions, self.rewards, self.dones = [], [], []
 
-    def add(self, o, no, a):
+    def add(self, o, no, a, r, d):
         if len(self.obs) >= self.capacity:
-            self.obs.pop(0); self.next_obs.pop(0); self.actions.pop(0)
-        self.obs.append(o); self.next_obs.append(no); self.actions.append(a)
+            self.obs.pop(0)
+            self.next_obs.pop(0)
+            self.actions.pop(0)
+            self.rewards.pop(0)
+            self.dones.pop(0)
+        self.obs.append(o)
+        self.next_obs.append(no)
+        self.actions.append(a)
+        self.rewards.append(r)
+        self.dones.append(d)
 
     def sample(self, batch_size):
         idx = np.random.choice(len(self.obs), size=batch_size, replace=False)
         return {
-            "obs": np.stack([self.obs[i] for i in idx]),
+            "obs":      np.stack([self.obs[i]      for i in idx]),
             "next_obs": np.stack([self.next_obs[i] for i in idx]),
-            "actions": np.array([self.actions[i] for i in idx], dtype=np.int64),
+            "actions":  np.array([self.actions[i]  for i in idx], dtype=np.int64),
+            "rewards":  np.array([self.rewards[i]  for i in idx], dtype=np.float32),
+            "dones":    np.array([self.dones[i]    for i in idx], dtype=np.float32),
         }
 
     def __len__(self):
@@ -117,7 +128,7 @@ def main():
     global_step = 0
 
     # --- TensorBoard writer ---
-    writer = SummaryWriter(log_dir="runs/deep_metaxis_crafter")
+    writer = SummaryWriter(log_dir="runs/deep_metaxis_crafter_imagination")
 
     print("Training... (lance `tensorboard --logdir runs` pour monitorer)")
 
@@ -131,26 +142,49 @@ def main():
 
         sleep_dyn = []
         sleep_rec = []
+        value_losses = []
+        plan_losses = []
 
         for step in range(max_steps):
             o = preprocess_obs(obs)
+
+            # action dans le monde réel
             a = agent.act(o)
             next_obs, rew, done, info = env.step(a)
             no = preprocess_obs(next_obs)
 
             ep_return += float(rew)
             metrics.step_info(info)
-            agent.train_veil_step(o, a, rew, no)
 
-            rb.add(o, no, int(a))
+            # buffer réel (pour monde + critic)
+            rb.add(o, no, int(a), float(rew), float(done))
             global_step += 1
 
-            # consolidation périodique
+            # --- update policy en imagination à partir de l'état courant ---
+            plan_logs = agent.train_policy_imagination(o)
+            plan_losses.append(plan_logs["planning_loss"])
+
+            # --- consolidation + critic sur batch périodique ---
             if len(rb) >= batch_size and global_step % sleep_every == 0:
                 batch = rb.sample(batch_size)
-                logs = agent.update_consolidation(batch)
-                sleep_dyn.append(logs['dyn_loss'])
-                sleep_rec.append(logs['recon_loss'])
+
+                world_batch = {
+                    "obs":      batch["obs"],
+                    "next_obs": batch["next_obs"],
+                    "actions":  batch["actions"],
+                }
+                logs_world = agent.update_consolidation(world_batch)
+                sleep_dyn.append(logs_world['dyn_loss'])
+                sleep_rec.append(logs_world['recon_loss'])
+
+                value_batch = {
+                    "obs":      batch["obs"],
+                    "next_obs": batch["next_obs"],
+                    "rewards":  batch["rewards"],
+                    "dones":    batch["dones"],
+                }
+                v_loss = agent.update_value_td(value_batch)
+                value_losses.append(v_loss)
 
             obs = next_obs
             if done or global_step >= max_interactions:
@@ -163,18 +197,23 @@ def main():
         total_ach = len(metrics.all_achievements)
         ach_ratio = ach / total_ach if total_ach > 0 else 0.0
 
-        mean_dyn = float(np.mean(sleep_dyn)) if sleep_dyn else 0.0
-        mean_rec = float(np.mean(sleep_rec)) if sleep_rec else 0.0
+        mean_dyn = float(np.mean(sleep_dyn))     if sleep_dyn   else 0.0
+        mean_rec = float(np.mean(sleep_rec))     if sleep_rec   else 0.0
+        mean_v   = float(np.mean(value_losses))  if value_losses else 0.0
+        mean_pl  = float(np.mean(plan_losses))   if plan_losses  else 0.0
 
         print(
-            f"[EP {ep}] return={ep_return:.2f} | sleep_dyn={mean_dyn:.4f} "
-            f"| sleep_recon={mean_rec:.4f} | achievements {ach}/{total_ach} ({ach_ratio:.2f})"
+            f"[EP {ep}] return={ep_return:.2f} | dyn={mean_dyn:.4f} "
+            f"| recon={mean_rec:.4f} | V_loss={mean_v:.4f} "
+            f"| plan_loss={mean_pl:.4f} | achievements {ach}/{total_ach} ({ach_ratio:.2f})"
         )
 
         # ----- Log TensorBoard -----
         writer.add_scalar("episode/return", ep_return, ep)
         writer.add_scalar("episode/mean_dyn_loss", mean_dyn, ep)
         writer.add_scalar("episode/mean_recon_loss", mean_rec, ep)
+        writer.add_scalar("episode/mean_value_loss", mean_v, ep)
+        writer.add_scalar("episode/mean_planning_loss", mean_pl, ep)
         writer.add_scalar("episode/achievements_ratio", ach_ratio, ep)
 
     env.close()
