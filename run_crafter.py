@@ -106,7 +106,7 @@ def main():
 
     size = 64
     latent_dim = 128
-    sleep_every = 1000
+    sleep_every = 30
     batch_size = 64
     max_steps = 5000
     max_interactions = 200_000
@@ -149,6 +149,8 @@ def main():
             o = preprocess_obs(obs)
 
             # action dans le monde réel
+
+            #L'agent agit
             a = agent.act(o)
             next_obs, rew, done, info = env.step(a)
             no = preprocess_obs(next_obs)
@@ -168,23 +170,12 @@ def main():
             if len(rb) >= batch_size and global_step % sleep_every == 0:
                 batch = rb.sample(batch_size)
 
-                world_batch = {
-                    "obs":      batch["obs"],
-                    "next_obs": batch["next_obs"],
-                    "actions":  batch["actions"],
-                }
-                logs_world = agent.update_consolidation(world_batch)
-                sleep_dyn.append(logs_world['dyn_loss'])
-                sleep_rec.append(logs_world['recon_loss'])
+                logs_sleep = agent.sleep_step(batch)
 
-                value_batch = {
-                    "obs":      batch["obs"],
-                    "next_obs": batch["next_obs"],
-                    "rewards":  batch["rewards"],
-                    "dones":    batch["dones"],
-                }
-                v_loss = agent.update_value_td(value_batch)
-                value_losses.append(v_loss)
+                sleep_dyn.append(logs_sleep['dyn_loss'])
+                sleep_rec.append(logs_sleep['recon_loss'])
+                value_losses.append(logs_sleep['value_loss'])
+
 
             obs = next_obs
             if done or global_step >= max_interactions:

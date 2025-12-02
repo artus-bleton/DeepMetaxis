@@ -5,7 +5,6 @@ import numpy as np
 
 from modules import Encoder, Decoder, LatentDynamics, Policy
 
-
 class DeepMetaxisAgent:
     """
     Monde latent VAE (encoder/decoder + dynamics) + curiosité (erreur de dynamique réelle)
@@ -177,6 +176,7 @@ class DeepMetaxisAgent:
         a_oh = self._one_hot(a_idx).to(self.device)
         return self.dynamics(z, a_oh)
 
+    ## Fonction inutilisée
     def compute_intrinsic_reward_real(self, obs, action, next_obs):
         """
         Curiosité (erreur de dynamique) sur des données réelles (optionnelle pour logging / normalisation).
@@ -199,7 +199,7 @@ class DeepMetaxisAgent:
         """mu: (B,d) -> V(μ): (B,1)"""
         return self.value_head(mu)
 
-    def update_value_td(self, batch):
+    def _update_value_td(self, batch):
         """
         Mise à jour du critic extrinsèque latent (TD(0)).
         batch:
@@ -230,7 +230,7 @@ class DeepMetaxisAgent:
         return float(loss.detach().cpu())
 
     # -------------------- consolidation (sleep) --------------------
-    def update_consolidation(self, batch):
+    def _update_consolidation(self, batch):
         """
         batch = {'obs': (B,C,H,W), 'next_obs': (B,C,H,W), 'actions': (B,)}
         Deux phases:
@@ -292,7 +292,41 @@ class DeepMetaxisAgent:
             'dyn_loss': float(dyn_loss.detach().cpu())
         }
 
+    def sleep_step(self, batch):
+            """
+            Sleep complet (monde + critic) à partir d'un batch :
+            batch = {
+                'obs': (B,C,H,W),
+                'next_obs': (B,C,H,W),
+                'actions': (B,),
+                'rewards': (B,),
+                'dones': (B,)
+            }
+            """
+            # 1) monde latent (VAE + dynamique)
+            world_batch = {
+                "obs":      batch["obs"],
+                "next_obs": batch["next_obs"],
+                "actions":  batch["actions"],
+            }
+            logs_world = self._update_consolidation(world_batch)
+
+            # 2) critic extrinsèque latent
+            value_batch = {
+                "obs":      batch["obs"],
+                "next_obs": batch["next_obs"],
+                "rewards":  batch["rewards"],
+                "dones":    batch["dones"],
+            }
+            v_loss = self._update_value_td(value_batch)
+
+            # on renvoie tout dans un seul dict
+            logs_world["value_loss"] = v_loss
+            return logs_world
+
     # -------------------- imagination & ennui --------------------
+
+    # Fonction beta qui calculere beta pour gere la notion de curiosité
     def _beta_from_value(self, v_pred, v_thr=1.0, alpha=1.0):
         """
         v_pred: scalaire (valeur extrinsèque prédite à partir du rollout).
@@ -334,6 +368,8 @@ class DeepMetaxisAgent:
 
         return torch.cat(mus, dim=0)  # (T,d)
 
+    # A faire :
+    # Corriger experimentalement pour le calcul de beta
     def _imagined_q_for_actions(self, mu_t):
         """
         Pour chaque action a0, construit un rollout latent en imagination,
@@ -388,6 +424,7 @@ class DeepMetaxisAgent:
         pi = torch.softmax(logits, dim=-1).squeeze(0)  # (A,)
 
         # KL(target || pi) ~ cross-entropy
+        # Ajuster la politique pour se rapprocher de la distribution cible
         planning_loss = torch.sum(
             target_dist * (torch.log(target_dist + 1e-8) - torch.log(pi + 1e-8))
         )
