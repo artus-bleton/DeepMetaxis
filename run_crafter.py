@@ -106,7 +106,7 @@ def main():
 
     size = 64
     latent_dim = 128
-    sleep_every = 32
+    sleep_every = 1000
     batch_size = 64
     max_steps = 5000
     max_interactions = 200_000
